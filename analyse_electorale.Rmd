@@ -1,0 +1,1135 @@
+---
+title: "Abstention à Genève"
+subtitle: "Qui vote, qui ne vote pas — et ce que ça change"
+date: "`r format(Sys.Date(), '%B %Y')`"
+output:
+  html_document:
+    theme: flatly
+    highlight: tango
+    toc: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+    toc_depth: 2
+    number_sections: false
+    code_folding: hide
+    fig_width: 9
+    fig_height: 5.5
+    fig_caption: true
+    css: style.css
+    self_contained: true
+editor_options:
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo      = TRUE, 
+  message   = FALSE,
+  warning   = FALSE,
+  fig.align = "center",
+  dpi       = 180
+)
+```
+
+```{r libraries, echo=FALSE}
+library(tidyverse)
+library(readxl)
+library(ggtext)
+library(patchwork)
+library(lubridate)
+library(ggrepel)
+library(ggspatial)
+library(sf)
+library(swissdd)
+library(here)
+library(glue)
+library(scales)
+library(ggiraph)
+```
+
+```{r palettes-themes, echo=FALSE}
+COL_H     <- "#3A7DBF"
+COL_F     <- "#C75B7A"
+COL_TOT   <- "#2C3E50"
+COL_GREY  <- "grey72"
+COL_OUI   <- "#2ECC71"
+COL_NON   <- "#E74C3C"
+COL_ABS   <- "grey65"
+COL_WHITE <- "white"
+
+PAL_CIVIL = "red"
+
+PAL_AGE <- c(
+  "18–39 ans"   = "#390099",
+  "40–64 ans"   = "#9e0059",
+  "65 ans ou +" = "#ff0054"
+)
+
+PAL_URBAIN <- c(
+  "Rural (<500 hab/km²)"           = "#A8D5A2",
+  "Péri-urbain (500–2000 hab/km²)" = "#5B9BD5",
+  "Urbain (>2000 hab/km²)"         = "#2C3E50"
+)
+
+PAL_CARTE <- c("#FFF3B0", "#FFD580", "#FFB347", "#FF8C42", "#FF6B35", "#D94F1E", "#C1440E", "#7A1A00")
+
+theme_elec <- function(base = 12) {
+  theme_minimal(base_size = base) %+replace% theme(
+    plot.title         = element_text(face = "bold", size = base + 2,
+                                      margin = margin(b = 4)),
+    plot.subtitle      = element_text(color = "grey45", size = base - 1,
+                                      margin = margin(b = 10)),
+    plot.caption       = element_text(color = "grey60", size = base - 3,
+                                      hjust = 1, margin = margin(t = 8)),
+    axis.title         = element_text(size = base - 1, color = "grey40"),
+    axis.text          = element_text(size = base - 2, color = "grey30"),
+    panel.grid.major   = element_line(color = "white", linewidth = 0.4),
+    panel.grid.minor   = element_blank(),
+    panel.grid.major.y = element_blank(),
+    legend.position    = "top",
+    legend.title       = element_blank(),
+    legend.key.size    = unit(0.5, "lines"),
+    plot.margin        = margin(12, 16, 8, 12)
+  )
+}
+
+theme_carte <- function(base = 12) {
+  theme_void(base_size = base) +
+    theme(
+      plot.title      = element_text(face = "bold", size = base + 2,
+                                     margin = margin(b = 4)),
+      plot.subtitle   = element_text(color = "grey45", size = base - 1,
+                                     margin = margin(b = 8)),
+      plot.caption    = element_text(color = "grey60", size = base - 3,
+                                     hjust = 1),
+      legend.position = "bottom",
+      legend.title    = element_text(size = base - 2),
+      plot.margin     = margin(10, 10, 10, 10)
+    )
+}
+
+```
+
+```{r fonctions-lecture-social, echo=FALSE}
+# =============================================================================
+# Colonnes attendues après normalisation (format 2016+, 14 colonnes)
+# Format pré-2016 : 15 colonnes avec une colonne vide en position 2
+# =============================================================================
+COL_NAMES <- c("Cat",
+               "Elec_H", "Elec_F", "Elec_Tot", "Elec_PctF", "vide1",
+               "Vot_H",  "Vot_F",  "Vot_Tot",  "Vot_PctF",  "vide2",
+               "Taux_H", "Taux_F", "Taux_Tot")
+
+# Mois en français — gère underscores ET espaces dans les noms de feuilles
+MOIS_FR <- c(janvier=1, février=2, mars=3, avril=4, mai=5, juin=6,
+             juillet=7, août=8, septembre=9, octobre=10, novembre=11, décembre=12)
+
+parse_sheet_date <- function(sheet_name) {
+  # Normalise les séparateurs : espaces ou underscores
+  s <- str_replace_all(str_trim(sheet_name), "_", " ")
+  # Nettoie "1er" → "1"
+  s <- str_replace(s, "(\\d+)er?\\s", "\\1 ")
+  # Supprime les points (abréviations)
+  s <- str_replace_all(s, "\\.", "")
+  parts <- str_split_1(s, "\\s+")
+  if (length(parts) < 3) return(NA_Date_)
+  tryCatch(
+    make_date(year  = as.integer(parts[3]),
+              month = MOIS_FR[str_to_lower(parts[2])],
+              day   = as.integer(parts[1])),
+    error = function(e) NA_Date_
+  )
+}
+
+normalise_civil <- function(x) {
+  x |> str_trim() |>
+    str_replace("^Marié.*",       "Marié·e")    |>
+    str_replace("^Célibataire.*", "Célibataire") |>
+    str_replace("^Veuf.*",        "Veuf·ve")     |>
+    str_replace("^Divorcé.*",     "Divorcé·e")   |>
+    str_replace("^Partenariat.*", "Partenariat")
+}
+
+read_block <- function(raw, anchor_re, nrows, skip_header = TRUE) {
+  idx <- which(str_detect(raw$Cat, regex(anchor_re, ignore_case = TRUE)))
+  if (length(idx) == 0) return(NULL)
+  start <- idx[1] + if (skip_header) 1L else 0L
+  end   <- min(start + nrows - 1L, nrow(raw))
+  if (start > nrow(raw)) return(NULL)
+  out <- raw[start:end, ] |>
+    filter(!is.na(Taux_Tot)) |>
+    mutate(across(-Cat, as.numeric), Cat = str_trim(Cat))
+  if (nrow(out) == 0) return(NULL)
+  out
+}
+
+read_sheet_data <- function(path, sheet) {
+  raw <- tryCatch(
+    read_excel(path, sheet = sheet, skip = 15,
+               col_names = FALSE, .name_repair = "minimal"),
+    error = function(e) NULL
+  )
+  if (is.null(raw) || ncol(raw) < 13) return(NULL)
+
+  # ── CORRECTION FORMAT PRÉ-2016 ─────────────────────────────────────────────
+  # Les fichiers 2013–2015 ont 15 colonnes avec une colonne vide en position 2
+  # (résidu de cellule fusionnée dans l'en-tête Excel).
+  # Sans correction : Taux_H lit la colonne vide → NA
+  #                   Taux_F lit la vraie colonne Taux_H
+  #                   Taux_Tot lit la vraie colonne Taux_F
+  # Règle de détection fiable : ncol == 15 ET colonne 2 entièrement NA
+  if (ncol(raw) >= 15 && all(is.na(raw[[2]]))) {
+    raw <- raw[, -2]  # supprimer la colonne vide parasite
+  }
+
+  raw <- raw[, seq_len(min(14L, ncol(raw)))]
+  if (ncol(raw) < 14) {
+    raw <- bind_cols(raw, setNames(
+      as.data.frame(matrix(NA_real_, nrow(raw), 14 - ncol(raw))),
+      paste0("pad", seq_len(14 - ncol(raw)))
+    ))
+  }
+  colnames(raw) <- COL_NAMES
+  raw <- mutate(raw, across(-Cat, as.numeric), Cat = as.character(Cat))
+
+  list(
+    age    = read_block(raw, "18\\s*-\\s*19\\s*ans", 16, FALSE),
+    blocs  = read_block(raw, "18\\s*-\\s*39\\s*ans",  3, FALSE),
+    civil  = read_block(raw, "Etat (matrimonial|civil)", 6, TRUE),
+    reside = read_block(raw, "Dur.e de r.sidence",   8, TRUE)
+  )
+}
+
+block_to_rows <- function(block, dim_label, date_scrutin, annee, feuille) {
+  if (is.null(block) || nrow(block) == 0) return(tibble())
+  block |> transmute(
+    Date = date_scrutin, Annee = annee, Feuille = feuille,
+    Dimension = dim_label, Cat,
+    Taux_H, Taux_F, Taux_Tot, Vot_H, Vot_F, Vot_Tot, Elec_Tot
+  )
+}
+
+load_all <- function(folder = ".") {
+  files <- list.files(folder, pattern = "T_17_03_4_02_\\d{4}\\.xlsx$",
+                      full.names = TRUE)
+  if (length(files) == 0) stop("Aucun fichier trouvé dans : ", folder)
+  map(files, function(path) {
+    annee  <- as.integer(str_extract(basename(path), "\\d{4}"))
+    sheets <- tryCatch(excel_sheets(path), error = function(e) character(0))
+    if (length(sheets) == 0) return(tibble())
+    map(sheets, function(sh) {
+      date_scrutin <- parse_sheet_date(sh)
+      blocks       <- read_sheet_data(path, sh)
+      if (is.null(blocks)) return(tibble())
+      blocs_clean <- if (!is.null(blocks$blocs))
+        blocks$blocs |>
+        mutate(Cat = case_when(
+          str_detect(Cat, "^18") ~ "18–39 ans",
+          str_detect(Cat, "^40") ~ "40–64 ans",
+          str_detect(Cat, "^65") ~ "65 ans ou +",
+          TRUE ~ Cat)) |>
+        filter(Cat %in% names(PAL_AGE))
+      else NULL
+      civil_clean <- if (!is.null(blocks$civil))
+        blocks$civil |> mutate(Cat = normalise_civil(Cat)) |>
+        filter(Cat %in% names(PAL_CIVIL))
+      else NULL
+      reside_clean <- if (!is.null(blocks$reside))
+        blocks$reside |>
+        filter(!str_detect(Cat, regex("inconnue|^total", ignore_case = TRUE)))
+      else NULL
+      bind_rows(
+        block_to_rows(blocks$age,   "Age_Detail", date_scrutin, annee, sh),
+        block_to_rows(blocs_clean,  "Age_Bloc",   date_scrutin, annee, sh),
+        block_to_rows(civil_clean,  "Civil",      date_scrutin, annee, sh),
+        block_to_rows(reside_clean, "Residence",  date_scrutin, annee, sh)
+      )
+    }) |> list_rbind()
+  }) |> list_rbind()
+}
+```
+
+```{r fonctions-lecture-communes, echo=FALSE}
+COL_NAMES_COM <- c("Commune", "vide1",
+                   "Elec_H", "Elec_F", "Elec_Tot", "Elec_PctF", "vide2",
+                   "Vot_H",  "Vot_F",  "Vot_Tot",  "Vot_PctF",  "vide3",
+                   "Taux_H", "Taux_F", "Taux_Tot")
+
+MOIS_FR_LONG <- c(
+  janvier=1, février=2, mars=3, avril=4, mai=5, juin=6,
+  juillet=7, août=8, septembre=9, octobre=10, novembre=11, décembre=12,
+  janv=1, fév=2, avr=4, juil=7, sept=9, oct=10, nov=11, déc=12
+)
+
+harmonise_commune <- function(x) {
+  x |> str_trim() |> str_replace_all("\u00a0", " ")
+}
+
+parse_sheet_date_long <- function(s) {
+  s <- str_trim(s) |>
+    str_replace("^(\\d+)e?r?\\s", "\\1 ") |>
+    str_replace_all("\\.", "")
+  parts <- str_split_1(s, "\\s+")
+  if (length(parts) < 3) return(NA_Date_)
+  tryCatch(
+    make_date(year  = as.integer(parts[3]),
+              month = MOIS_FR_LONG[str_to_lower(parts[2])],
+              day   = as.integer(parts[1])),
+    error = function(e) NA_Date_
+  )
+}
+
+read_commune_sheet <- function(path, sheet) {
+  raw <- tryCatch(
+    read_excel(path, sheet = sheet, skip = 13,
+               col_names = FALSE, .name_repair = "minimal"),
+    error = function(e) NULL
+  )
+  if (is.null(raw) || ncol(raw) < 13) return(NULL)
+  raw <- raw[, seq_len(min(15L, ncol(raw)))]
+  if (ncol(raw) < 15) {
+    raw <- bind_cols(raw, setNames(
+      as.data.frame(matrix(NA_real_, nrow(raw), 15L - ncol(raw))),
+      paste0("pad", seq_len(15L - ncol(raw)))
+    ))
+  }
+  colnames(raw) <- COL_NAMES_COM
+  raw |>
+    select(-starts_with("vide"), -starts_with("pad")) |>
+    mutate(Commune = as.character(Commune), across(-Commune, as.numeric)) |>
+    filter(!is.na(Commune), Commune != "",
+           !str_detect(Commune, "^Canton$|^\\(|^Source"),
+           !is.na(Taux_Tot))
+}
+
+load_all_communes <- function(folder = ".") {
+  files <- list.files(folder, pattern = "T_17_03_4_01_\\d{4}\\.xlsx$",
+                      full.names = TRUE)
+  if (length(files) == 0) stop("Aucun fichier T_17_03_4_01 trouvé dans : ", folder)
+  map(files, function(path) {
+    annee  <- as.integer(str_extract(basename(path), "\\d{4}"))
+    sheets <- tryCatch(excel_sheets(path), error = function(e) character(0))
+    map(sheets, function(sh) {
+      bloc <- read_commune_sheet(path, sh)
+      if (is.null(bloc)) return(tibble())
+      bloc |> mutate(Date = parse_sheet_date_long(sh),
+                     Annee = annee, Feuille = sh, .before = everything())
+    }) |> list_rbind()
+  }) |> list_rbind()
+}
+```
+
+```{r chargement-donnees, echo=FALSE}
+folder_social   <- here::here("abstention_geneve", "data", "social")
+folder_communes <- here::here("abstention_geneve", "data", "commune")
+
+df     <- load_all(folder_social)
+df_com <- load_all_communes(folder_communes)
+
+ref_date  <- max(df$Date, na.rm = TRUE)
+ref_label <- format(ref_date, "%d %B %Y")
+
+df_age_ref   <- df |> filter(Date == ref_date, Dimension == "Age_Detail")
+df_blocs_ref <- df |> filter(Date == ref_date, Dimension == "Age_Bloc")
+df_civil_ref <- df |> filter(Date == ref_date, Dimension == "Civil")
+
+df_annuel <- df |>
+  group_by(Annee, Dimension, Cat) |>
+  summarise(across(c(Taux_H, Taux_F, Taux_Tot, Vot_Tot, Elec_Tot),
+                   \(x) mean(x, na.rm = TRUE)),
+            n_scrutins = n_distinct(Feuille), .groups = "drop")
+
+SCRUTIN_REF <- list(
+  date         = "8 mars 2026",
+  objet        = "Initiative « 200 francs, ça suffit ! »",
+  inscrits     = 286718,
+  votants      = 139487,
+  oui          = 66954,
+  non          = 72533,
+  pop_resid    = 537000,
+  pop_etranger = 223000
+)
+
+abstentions <- SCRUTIN_REF$inscrits - SCRUTIN_REF$votants
+```
+
+```{r make-waffle, echo=FALSE}
+make_waffle <- function(categories, counts, unite = 1000) {
+  cubes <- round(counts / unite)
+  tibble(categorie = rep(categories, cubes)) |>
+    mutate(
+      id = row_number(),
+      x  = (id - 1) %% 20 + 1,
+      y  = (id - 1) %/% 20
+    )
+}
+```
+
+------------------------------------------------------------------------
+
+# Introduction {.tabset}
+
+> Le **8 mars 2026**, les Genevois étaient appelés à voter sur l'initiative fédérale *« 200 francs, ça suffit! »*. L'initiative a été **refusée**. Mais qui a réellement décidé ? et pour qui ?
+
+## Non
+
+```{r w1, fig.height=7.5}
+w1 <- make_waffle(c("Non"), c(SCRUTIN_REF$non)) |>
+  mutate(categorie = factor(categorie, "Non"))
+
+g_w1 <- ggplot(w1, aes(x = x, y = y, fill = categorie)) +
+  geom_tile(color = "white", linewidth = 0.6) +
+  scale_fill_manual(values = c("Non" = COL_NON), guide = "none") +
+  coord_fixed() +
+  labs(title    = glue("**{comma(SCRUTIN_REF$non)}** personnes ont voté non"),
+       subtitle = "Chaque carré = 1 000 voix") +
+  theme_void() +
+  theme(plot.title    = element_textbox_simple(face = "bold", size = 12,
+                                               margin = margin(l=20, b=5)),
+        plot.subtitle = element_text(color = "grey45", size = 9,
+                                     margin = margin(l=20, b=2)),
+        plot.margin   = margin(10, 10, 10, 10))
+
+g_w1
+```
+
+## Tous les votes
+
+```{r w2, fig.height=7.5}
+w2 <- make_waffle(c("Non","Oui"), c(SCRUTIN_REF$non, SCRUTIN_REF$oui)) |>
+  mutate(categorie = factor(categorie, c("Non","Oui")))
+
+g_w2 <- ggplot(w2, aes(x = x, y = y, fill = categorie)) +
+  geom_tile(color = "white", linewidth = 0.6) +
+  scale_fill_manual(values = c("Non"=COL_NON, "Oui"=COL_OUI), guide = "none") +
+  coord_fixed() +
+  labs(title    = glue("**{comma(SCRUTIN_REF$oui)}** personnes ont voté oui"),
+       subtitle = "Chaque carré = 1 000 voix") +
+  theme_void() +
+  theme(plot.title    = element_textbox_simple(face = "bold", size = 12,
+                                               margin = margin(l=20, b=5)),
+        plot.subtitle = element_text(color = "grey45", size = 9,
+                                     margin = margin(l=20, b=2)),
+        plot.margin   = margin(10, 10, 10, 10))
+
+g_w2
+```
+
+## Votes et abstention
+
+```{r w3, fig.height=7.5}
+w3 <- make_waffle(
+  c("Non (Décisif)","Oui","Abstention"),
+  c(SCRUTIN_REF$non, SCRUTIN_REF$oui, abstentions)
+) |> mutate(categorie = factor(categorie, c("Non (Décisif)","Oui","Abstention")))
+
+g_w3 <- ggplot(w3, aes(x = x, y = y, fill = categorie)) +
+  geom_tile(color = "white", linewidth = 0.6) +
+  scale_fill_manual(values = c("Non (Décisif)"=COL_NON,
+                               "Oui"=COL_OUI, "Abstention"=COL_ABS)) +
+  coord_fixed() +
+  labs(title    = "24% des votants ont suffi pour refuser l'initiative",
+       subtitle = glue("{comma(abstentions)} personnes n'ont pas voté"),
+       fill = NULL) +
+  theme_void() +
+  theme(plot.title    = element_textbox_simple(face = "bold", size = 12,
+                                               margin = margin(l=20, b=5)),
+        plot.subtitle = element_text(color = "grey45", size = 9,
+                                     margin = margin(l=20, b=2)),
+        legend.position = "bottom",
+        plot.margin     = margin(10, 10, 10, 10))
+
+g_w3
+
+```
+
+------------------------------------------------------------------------
+
+# Qui vote à Genève ? {.tabset}
+
+> Genève dispose de données exceptionnellement riches sur la participation électorale. 
+Explorons qui se rend aux urnes. 
+On commence par une analyse par groupe d'âge puis on facet par le sexe. 
+
+## Répartition par tranches d'âge
+
+```{r g2-1}
+df_age_moy <- df_annuel |>
+  filter(Dimension == "Age_Detail") |>
+  mutate(Cat = str_trim(Cat) |> str_remove("\\s*ans$")) |>
+  mutate(Cat = str_trim(Cat) |> str_remove("\\s*ans$") |> str_replace("90 ans ou plus", "90 ou plus")) |>
+  group_by(Cat) |>
+  summarise(Taux_Tot = mean(Taux_Tot, na.rm = TRUE), .groups = "drop") |>
+  mutate(Cat = fct_inorder(Cat))
+
+
+g2_1 <- ggplot(df_age_moy, aes(x = Cat, y = Taux_Tot, group = 1)) +
+  geom_line(color = COL_TOT, linewidth = 0.75) +
+  geom_point(color = COL_TOT, size = 3) +
+  scale_y_continuous(labels = \(x) paste0(x, "%"), limits = c(0, 100)) +
+  labs(title    = glue("Participation par âge"),
+       subtitle = "Moyenne de tous les scrutins 2005–2026",
+       x = NULL, y = "Taux de participation",
+       caption = "Source : OCSTAT") +
+  theme_elec(base = 12) +
+  theme(axis.text.x        = element_text(angle = 40, hjust = 1, size = 9),
+        panel.grid.major.y = element_line(color = "grey93", linewidth = 0.4),
+        panel.grid.major.x = element_blank(),
+        #plot.title.position = "plot",
+        plot.title          = element_text(hjust = 0)
+)
+g2_1
+
+```
+
+> On voit que les seniors (65+ ans) votent plus (en moyenne) que les jeunes.
+
+## Hommes vs Femmes
+
+```{r g2-2}
+df_line_hf <- df_annuel |>
+  filter(Dimension == "Age_Detail") |>
+  mutate(Cat = str_trim(Cat) |> str_remove("\\s*ans$")) |>
+  mutate(Cat = str_trim(Cat) |> str_remove("\\s*ans$") |> str_replace("90 ans ou plus", "90 ou plus")) |>
+  group_by(Cat) |>
+  summarise(Taux_H = mean(Taux_H, na.rm = TRUE),
+            Taux_F = mean(Taux_F, na.rm = TRUE), .groups = "drop") |>
+  mutate(Cat = fct_inorder(Cat)) |>
+  pivot_longer(c(Taux_H, Taux_F), names_to = "Sexe", values_to = "Taux",
+               names_pattern = "Taux_(.)") |>
+  mutate(Sexe = if_else(Sexe == "H", "Hommes", "Femmes"))
+
+g2_2 <- ggplot(df_line_hf, aes(x = Cat, y = Taux, color = Sexe, group = Sexe)) +
+  geom_line(linewidth = 0.75) +
+  geom_point(size = 3) +
+  scale_color_manual(values = c(Hommes = COL_H, Femmes = COL_F)) +
+  scale_y_continuous(labels = \(x) paste0(x, "%"), limits = c(0, 100)) +
+  labs(title    = glue("Participation par âge, ",
+                "<span style='color:{COL_H}'>**Hommes**</span>",
+                " et ",
+                "<span style='color:{COL_F}'>**Femmes**</span>"),
+subtitle = "Moyenne de tous les scrutins 2005–2026",
+       x = NULL, y = "Taux de participation",
+       caption = "Source : OCSTAT") +
+  theme_elec() +
+  theme(axis.text.x        = element_text(angle = 40, hjust = 1, size=9),
+        panel.grid.major.y = element_line(color = "grey93"),
+        panel.grid.major.x = element_blank(),
+        legend.position    = "none",
+        plot.title         = element_textbox_simple(face = "bold", size = 14,
+                                                    margin = margin(b = 4)))
+g2_2
+```
+
+> Une nouvelle dynamique apparait ici. Les jeunes femmes votent plus que les jeunes hommes. Cette dynamique s'inverse et s'aggrandit plus on va vers les populations âgées.
+
+# La participation a été changé dans le temps pour ces groupes ? {.tabset}
+
+> On peut désormais se demander si ces différentes catégories d'âge ont toujours eu ce taux de participation ou si c'est un phénomène récent ? 
+
+## A-t-on toujours voté comme ça ?
+```{r gt1_1}
+df_t1 <- df_annuel |>
+  filter(Dimension == "Age_Bloc") |>
+  mutate(Cat = factor(Cat, levels = names(PAL_AGE)))
+
+gt1_1 <- ggplot(df_t1, aes(x = Annee, y = Taux_Tot, color = Cat, group = Cat)) +
+  geom_line(linewidth = 0.65) +
+  geom_point() +
+  scale_color_manual(values = PAL_AGE) +
+  scale_size_continuous(range = c(0.5, 5), guide = "none") +
+  scale_y_continuous(labels = \(x) paste0(x, "%"), limits = c(0, 100)) +
+  scale_x_continuous(breaks = sort(unique(df_annuel$Annee))) +
+  labs(title    = "A-t-on toujours voté comme ça ?",
+       subtitle = "Participation moyenne par bloc d'âge",
+       x = NULL, y = "Taux de participation",
+       caption = "Source : OCSTAT") +
+  theme_elec()+
+  theme(axis.text.x        = element_text(angle = 45, hjust = 1),
+        panel.grid.major.x = element_line(color = "grey93", linewidth = 0.3),
+        panel.grid.major.y = element_line(color = "grey93"),
+        legend.position    = "top",
+        legend.text        = element_text(size = 11.8),  # Plus grand pour les catégories
+  )
+
+gt1_1
+```
+
+> On voit que depuis 20 ans, les écarts entre les trois catégories restent similaires. Quand les seniors votent plus, les autres catégories d'âge votent plus aussi. Il ne semble pas y avoir un effet de l'âge sur le vote mais plutôt du sujet.
+
+## Avec contexte 
+```{r gt1_2}
+
+scrutins_notables <- tribble(
+  ~Annee, ~label,
+  2014,   " Immigration\n  Gripen\n Salaire minimum\n" ,
+  2021,   " Loi Covid\n Loi C02"
+)
+
+gt1_2 <- gt1_1 + 
+  geom_vline(data = scrutins_notables, aes(xintercept = Annee),
+             linetype = "dashed", color = "grey50", linewidth = 0.5) +
+  geom_text(data = scrutins_notables, aes(x = Annee, y = 79, label = label),
+            inherit.aes = FALSE, size = 3., color = "grey40",
+            hjust = -0.08, lineheight = 0.9) +
+  geom_line(linewidth = 0.65) 
+
+gt1_2
+```
+
+> On voit que depuis 20 ans, les écarts entre les trois catégories restent similaires. Quand les seniors votent plus, les autres catégories d'âge votent plus aussi. Il ne semble pas y avoir un effet de l'âge sur le vote mais plutôt du sujet.
+
+------------------------------------------------------------------------
+
+# Géographie de l'abstention
+
+> On peut aussi explorer les données communales dans le Canton de Genève sur l'abstention depuis 2005. Toujours dans le but de comprendre mieux qui vote (et qui ne vote pas), les données géographiques nous permettent d'avoir une meilleure compréhension. 
+
+```{r geodata, echo=FALSE}
+geo_raw <- swissdd::get_geodata(geolevel = "municipality")
+if (is.na(st_crs(geo_raw))) geo_raw <- st_set_crs(geo_raw, 2056)
+
+federalvotes <- get_nationalvotes(geolevel = "municipality")
+ge_ids <- federalvotes |>
+  filter(canton_id == 25) |>
+  distinct(mun_id) |>
+  mutate(mun_id = as.numeric(mun_id))
+
+communes_noms <- federalvotes |>
+  filter(canton_id == 25) |>
+  distinct(mun_id, mun_name) |>
+  mutate(mun_id = as.numeric(mun_id))
+
+communes_ge_sf <- geo_raw |>
+  mutate(mun_id = as.numeric(mun_id)) |>
+  semi_join(ge_ids, by = "mun_id") |>
+  left_join(communes_noms, by = "mun_id") |>
+  mutate(
+    Commune_geo    = harmonise_commune(mun_name),
+    Superficie_km2 = as.numeric(st_area(geometry)) / 1e6
+  ) |>
+  st_transform(2056)
+
+POP_COMMUNES <- tribble(
+  ~Commune,                ~Population,
+  "Aire-la-Ville",1060,"Anières",2600,"Avully",2500,"Avusy",1700,
+  "Bardonnex",2900,"Bellevue",4200,"Bernex",12500,"Carouge",24000,
+  "Cartigny",1000,"Céligny",750,"Chancy",1300,"Chêne-Bougeries",12000,
+  "Chêne-Bourg",8500,"Choulex",1500,"Collex-Bossy",2100,
+  "Collonge-Bellerive",7500,"Cologny",5500,"Confignon",5500,
+  "Corsier",2200,"Dardagny",1900,"Genève",204000,"Genthod",2800,
+  "Grand-Saconnex",12000,"Gy",600,"Hermance",1100,"Jussy",1500,
+  "Laconnex",700,"Lancy",31000,"Meinier",2400,"Meyrin",26000,
+  "Onex",20000,"Perly-Certoux",3900,"Plan-les-Ouates",10500,
+  "Pregny-Chambésy",4100,"Presinge",900,"Puplinge",2900,"Russin",550,
+  "Satigny",5500,"Soral",950,"Thônex",16000,"Troinex",2600,
+  "Vandoeuvres",3000,"Vernier",36000,"Versoix",13000,"Veyrier",10000
+)
+
+NOM_CORRECTION <- tribble(
+  ~Commune_excel,    ~Commune_geo,
+  "Carouge",         "Carouge (GE)",
+  "Corsier",         "Corsier (GE)",
+  "Grand-Saconnex",  "Le Grand-Saconnex"
+)
+
+df_com_resume <- df_com |>
+  mutate(Commune = harmonise_commune(Commune)) |>
+  filter(!str_detect(Commune, "\\(\\d+\\)$")) |>
+  group_by(Commune) |>
+  summarise(
+    Taux_median = median(Taux_Tot, na.rm = TRUE),
+    Taux_moyen  = mean(Taux_Tot,   na.rm = TRUE),
+    Taux_sd     = sd(Taux_Tot,     na.rm = TRUE),
+    Taux_min    = min(Taux_Tot,    na.rm = TRUE),
+    Taux_max    = max(Taux_Tot,    na.rm = TRUE),
+    Elec_moy    = mean(Elec_Tot,   na.rm = TRUE),
+    n_scrutins  = n(), .groups = "drop"
+  ) |>
+  left_join(POP_COMMUNES, by = "Commune")
+
+df_com_join <- df_com_resume |>
+  mutate(Commune_geo = case_when(
+    Commune %in% NOM_CORRECTION$Commune_excel ~
+      NOM_CORRECTION$Commune_geo[match(Commune, NOM_CORRECTION$Commune_excel)],
+    TRUE ~ Commune
+  )) |>
+  select(-Commune)
+
+map_data <- communes_ge_sf |>
+  left_join(df_com_join, by = "Commune_geo") |>
+  mutate(
+    Densite     = Population / Superficie_km2,
+    Type_urbain = case_when(
+      is.na(Densite)  ~ NA_character_,
+      Densite >= 2000 ~ "Urbain (>2000 hab/km²)",
+      Densite >= 500  ~ "Péri-urbain (500–2000 hab/km²)",
+      TRUE            ~ "Rural (<500 hab/km²)"
+    ) |> factor(levels = names(PAL_URBAIN))
+  )
+
+
+
+labels_map <- map_data |>
+  filter(!is.na(Taux_moyen)) |>
+  mutate(centre = st_centroid(geometry),
+         X = st_coordinates(centre)[,1],
+         Y = st_coordinates(centre)[,2]) |>
+  st_drop_geometry() |>
+  select(Commune_geo, Taux_median, Taux_moyen, X, Y)
+```
+
+
+## Carte par commune
+
+```{r gc1, fig.height=7}
+# gc1 <- ggplot(map_data) +
+#   geom_sf(aes(fill = Taux_moyen), color = "white", linewidth = 0.1) +
+#   geom_text(
+#   data = labels_map,
+#   aes(x = X, y = Y, label = str_wrap(str_replace_all(Commune_geo, "-", "-\n"), width = 2)),
+#   size = 1.2, color = "black", alpha = 0.8, fontface = "bold"
+# )+
+#   scale_fill_gradientn(colors = PAL_CARTE, na.value = "grey88",
+#                      #limits = c(40, 70),
+#                      name = "Taux moyen",
+#                      labels = \(x) paste0(x, "%"),
+#                      guide  = guide_colorbar(barwidth = 14, barheight = 0.9,
+#                                              title.position = "top",
+#                                              title.hjust = 0.5)) +
+#   labs(title    = "Taux de participation moyen par commune (2005–2026)",
+#        subtitle = "Moyenne de tous les scrutins disponibles",
+#        caption  = "Source : OCSTAT | Fond : swissdd / swisstopo") +
+#   theme_carte()
+# 
+# gc1
+```
+
+> On peut afficher la participation moyenne par commune pour avoir une première idée.
+
+```{r, gc_interactive}
+library(ggiraph)
+
+gc1_interactive <- ggplot(map_data) +
+  geom_sf_interactive(
+    aes(
+      fill     = Taux_moyen,
+      tooltip  = paste0("<b>", Commune_geo, "</b><br>", round(Taux_moyen, 1), "%"),
+      data_id  = Commune_geo
+    ),
+    color     = "white",
+    linewidth = 0.1
+  ) +
+  scale_fill_gradientn(
+    colors   = PAL_CARTE,
+    na.value = "grey88",
+    name     = "Taux moyen",
+    labels   = \(x) paste0(x, "%"),
+    guide    = guide_colorbar(
+      barwidth       = 14,
+      barheight      = 0.9,
+      title.position = "top",
+      title.hjust    = 0.5
+    )
+  ) +
+  labs(
+    title    = "Taux de participation moyen par commune (2005–2026)",
+    subtitle = "Moyenne de tous les scrutins disponibles",
+    caption  = "Source : OCSTAT | Fond : swissdd / swisstopo"
+  ) +
+  theme_carte()
+
+girafe(
+  ggobj  = gc1_interactive,
+  width_svg  = 7,
+  height_svg = 7,
+  options = list(
+    opts_hover(css = "fill-opacity:0.8; stroke:white; stroke-width:1.5px;"),
+    opts_tooltip(
+      css        = "background-color:white; color:black; padding:6px 10px;
+                   border-radius:4px; border:1px solid #ccc; font-size:13px;",
+      use_cursor_pos = TRUE
+    )
+  )
+)
+```
+
+> On voit une tendance où les centres urbains votent moins que les campagnes.
+
+## Différence entre ville et campagne ? {.tabset}
+
+> Peut-on quantifier cette différence ville / campagne ? 
+
+### Scatter Plot
+```{r gc2_1}
+
+library(ggiraph)
+
+# ── gc2_1 : points gris ───────────────────────────────────────────────────────
+df_scatter <- map_data |>
+  st_drop_geometry() |>
+  filter(!is.na(Taux_moyen), !is.na(Densite))
+
+gc2_1 <- ggplot(df_scatter, aes(x = Densite, y = Taux_moyen)) +
+  geom_point_interactive(
+    aes(
+      size    = Elec_moy,
+      tooltip = paste0(
+        "<b>", Commune_geo, "</b><br>",
+        "Participation médiane : ", round(Taux_moyen, 1), "%<br>",
+        "Densité : ", round(Densite), " hab/km²", "<br>",
+        "Population : ", round(Population)
+      ),
+      data_id = Commune_geo
+    ),
+    color = "grey60", alpha = 0.5
+  ) +
+  scale_x_log10(limits = c(75, NA), labels = comma,
+                breaks = c(100, 300, 1000, 3000, 10000)) +
+  scale_y_continuous(labels = \(x) paste0(x, "%")) +
+  scale_size_continuous(range = c(2, 12), guide = "none") +
+  labs(title    = "Participation électorale et densité urbaine",
+       subtitle = "Taille rond = corps électoral moyen",
+       x        = "Densité de population (hab/km², échelle log)",
+       y        = "Taux de participation moyen",
+       caption  = "Source : OCSTAT") +
+  theme_elec() +
+  theme(panel.grid.major.x = element_line(color = "grey93"),
+        panel.grid.major.y = element_line(color = "grey93"))
+
+girafe(ggobj = gc2_1, width_svg = 7, height_svg = 5,
+       options = list(
+         opts_hover(css = "fill-opacity:1; stroke:grey30; stroke-width:1px;"),
+         opts_tooltip(css = "background-color:white; color:black; padding:6px 10px;
+                            border-radius:4px; border:1px solid #ccc; font-size:13px;",
+                      use_cursor_pos = TRUE)
+       ))
+```
+
+### Couleurs par densité
+```{r gc2_2}
+
+# ── gc2_2 : couleurs par densité ──────────────────────────────────────────────
+df_scatter <- map_data |>
+  st_drop_geometry() |>
+  filter(!is.na(Taux_moyen), !is.na(Densite), !is.na(Type_urbain))
+
+gc2_2 <- gc2_1 %+% df_scatter +
+  geom_point_interactive(
+    aes(
+      size    = Elec_moy,
+      color   = Type_urbain,
+      tooltip = paste0(
+        "<b>", Commune_geo, "</b><br>",
+        "Participation moyen : ", round(Taux_moyen, 1), "%<br>",
+        "Densité : ", round(Densite), " hab/km²", "<br>",
+        "Population : ", round(Population)
+      ),
+      data_id = Commune_geo
+    ),
+    alpha = 0.5
+  ) +
+  scale_color_manual(values = PAL_URBAIN, name = NULL) +
+  theme(legend.position = "none")
+
+girafe(ggobj = gc2_2, width_svg = 7, height_svg = 5,
+       options = list(
+         opts_hover(css = "fill-opacity:1; stroke:grey30; stroke-width:1px;"),
+         opts_tooltip(css = "background-color:white; color:black; padding:6px 10px;
+                            border-radius:4px; border:1px solid #ccc; font-size:13px;",
+                      use_cursor_pos = TRUE)
+       ))
+```
+
+### Avec legende
+```{r gc2_3}
+
+
+# ── gc2_3 : avec légende ──────────────────────────────────────────────────────
+gc2_3 <- gc2_2 +
+  theme(legend.position = "top")
+
+girafe(ggobj = gc2_3, width_svg = 7, height_svg = 5,
+       options = list(
+         opts_hover(css = "fill-opacity:1; stroke:grey30; stroke-width:1px;"),
+         opts_tooltip(css = "background-color:white; color:black; padding:6px 10px;
+                            border-radius:4px; border:1px solid #ccc; font-size:13px;",
+                      use_cursor_pos = TRUE)
+       ))
+
+```
+
+
+### Attention à la manipulation visuelle
+```{r gc2_4}
+
+# ── gc2_4 : axe Y complet 0–100 ───────────────────────────────────────────────
+gc2_4 <- gc2_3 +
+  scale_y_continuous(labels = \(x) paste0(x, "%"), limits = c(0, 100))
+
+girafe(ggobj = gc2_4, width_svg = 7, height_svg = 5,
+       options = list(
+         opts_hover(css = "fill-opacity:1; stroke:grey30; stroke-width:1px;"),
+         opts_tooltip(css = "background-color:white; color:black; padding:6px 10px;
+                            border-radius:4px; border:1px solid #ccc; font-size:13px;",
+                      use_cursor_pos = TRUE)
+       ))
+```
+> Attention à l'axe Y, on aurait pu croire à une immense différence entre ville et campagne. Il reste important de garder en tête que ces changements ne sont pas si massifs.
+
+``` {r gc2_static}
+# df_scatter <- map_data |>
+#   st_drop_geometry() |>
+#   filter(!is.na(Taux_median), !is.na(Densite))
+# gc2_1 <- ggplot(df_scatter, aes(x = Densite, y = Taux_median)) +
+#   geom_point(aes(size = Elec_moy), color = "grey60", alpha = 0.5) +
+#   geom_text_repel(
+#     data = df_scatter |>
+#       filter(Taux_median > quantile(Taux_median, 0.87, na.rm = TRUE) |
+#              Taux_median < quantile(Taux_median, 0.13, na.rm = TRUE)),
+#     aes(label = str_wrap(str_replace_all(Commune_geo, "-", "-\n"), width = 5)),
+#     size = 3.1, color = "grey25", max.overlaps = 5, segment.size = 0.3,
+#     seed = 5, nudge_y = 0.5, direction = "y"
+#   ) +
+#   scale_x_log10(limits = c(75, NA), labels = comma,
+#                 breaks = c(100, 300, 1000, 3000, 10000)) +
+#   scale_y_continuous(labels = \(x) paste0(x, "%")) +
+#   scale_size_continuous(range = c(2, 12), guide = "none") +
+#   labs(title    = "Participation électorale et densité urbaine",
+#        subtitle = "Taille = corps électoral moyen",
+#        x = "Densité de population (hab/km², échelle log)",
+#        y = "Taux de participation médian",
+#        caption = "Source : OCSTAT") +
+#   theme_elec() +
+#   theme(panel.grid.major.x = element_line(color = "grey93"),
+#         panel.grid.major.y = element_line(color = "grey93"))
+# gc2_1
+# 
+# ### Couleurs par densité
+# df_scatter <- map_data |>
+#   st_drop_geometry() |>
+#   filter(!is.na(Taux_median), !is.na(Densite), !is.na(Type_urbain))
+# gc2_2 <- gc2_1 +
+#   geom_point(aes(size = Elec_moy, color = Type_urbain), alpha = 0.5) +
+#   scale_color_manual(values = PAL_URBAIN, name = NULL) +
+#   theme(legend.position = "none")
+# gc2_2
+# 
+# ### Avec legende
+# gc2_3 <- gc2_2 +
+#   theme(legend.position = "top")
+# gc2_3
+# 
+# ### Attention à la manipulation visuelle
+# gc2_4 <- gc2_3 +
+#   scale_y_continuous(labels = \(x) paste0(x, "%"), limits = c(0, 100))
+# gc2_4
+
+```
+
+
+## Distribution par type de commune
+
+> Avec ces données on peut afficher chaque votation comme un point. On observe que les distributions ne sont pas parfaitement normale.
+On peut même hypothéser sur la presence d'un comportement de voteurs qui se mobilisent pour certaines votations.
+
+
+```{r gc3}
+
+library(ggdist)
+
+type_par_commune <- map_data |>
+  st_drop_geometry() |>
+  select(Commune_geo, Type_urbain) |>
+  filter(!is.na(Type_urbain))
+
+df_box <- df_com |>
+  mutate(Commune = harmonise_commune(Commune)) |>
+  filter(!str_detect(Commune, "\\(\\d+\\)$")) |>
+  inner_join(type_par_commune, by = c("Commune" = "Commune_geo")) |>
+  filter(!is.na(Taux_Tot))
+
+gc3 <- ggplot(df_box, aes(x = Type_urbain, y = Taux_Tot, fill = Type_urbain)) +
+  stat_halfeye(adjust = 0.5, width = 0.6, justification = -0.3,
+               .width = 0, point_colour = NA, alpha = 0.4) +
+  geom_boxplot(width = 0.32, color = "black",
+               alpha = 0, linewidth = 0.3, stat = "boxplot") +
+  geom_point(position = position_jitter(width = 0.1, seed = 44),
+             size = 0.8, alpha = 0.35, color = "grey40") +
+  scale_fill_manual(values = PAL_URBAIN, guide = "none") +
+  scale_y_continuous(labels = \(x) paste0(x, "%"), breaks = seq(0, 100, 10)) +
+  coord_flip() +
+  labs(title    = "Distribution de la participation selon le type de commune",
+       subtitle = "Chaque point = un scrutin dans une commune",
+       x = NULL, y = "Taux de participation",
+       caption = "Source : OCSTAT") +
+  theme_elec() +
+  theme(panel.grid.major.x = element_line(color = "grey93", linewidth = 0.3),
+        panel.grid.major.y = element_blank(),
+        legend.text        = element_text(size = 9.8))
+
+gc3
+```
+
+
+
+------------------------------------------------------------------------
+
+# Est-ce qu'on aurait pas oublié une population ? {.tabset}
+
+> Et si on élargissait le regard au-delà du corps électoral "classique" ?
+
+```{r make-waffle_2, echo=FALSE}
+make_waffle <- function(categories, counts, unite = 1000) {
+  cubes <- round(counts / unite)
+  tibble(categorie = rep(categories, cubes)) |>
+    mutate(
+      id = row_number(),
+      x  = (id - 1) %% 25 + 1,
+      y  = (id - 1) %/% 25
+    )
+}
+```
+
+## Non
+
+```{r w1_2, fig.height=12}
+w1 <- make_waffle(c("Non"), c(SCRUTIN_REF$non)) |>
+  mutate(categorie = factor(categorie, "Non"))
+
+g_w2_1 <- ggplot(w1, aes(x = x, y = y, fill = categorie)) +
+  geom_tile(color = "white", linewidth = 0.6) +
+  scale_fill_manual(values = c("Non" = COL_NON), guide = "none") +
+  coord_fixed() +
+  labs(title    = glue("**{comma(SCRUTIN_REF$non)}** personnes ont voté non"),
+       subtitle = "Chaque carré = 1 000 voix") +
+  theme_void() +
+  theme(plot.title    = element_textbox_simple(face = "bold", size = 12,
+                                               margin = margin(l=20, b=5)),
+        plot.subtitle = element_text(color = "grey45", size = 9,
+                                     margin = margin(l=20, b=2)),
+        plot.margin   = margin(10, 10, 10, 10))
+
+g_w2_1
+```
+
+## Tous les votes
+
+```{r w2_2, fig.height=12}
+w2 <- make_waffle(c("Non","Oui"), c(SCRUTIN_REF$non, SCRUTIN_REF$oui)) |>
+  mutate(categorie = factor(categorie, c("Non","Oui")))
+
+g_w2_2 <- ggplot(w2, aes(x = x, y = y, fill = categorie)) +
+  geom_tile(color = "white", linewidth = 0.6) +
+  scale_fill_manual(values = c("Non"=COL_NON, "Oui"=COL_OUI), guide = "none") +
+  coord_fixed() +
+  labs(title    = glue("**{comma(SCRUTIN_REF$oui)}** personnes ont voté oui"),
+       subtitle = "Chaque carré = 1 000 voix") +
+  theme_void() +
+  theme(plot.title    = element_textbox_simple(face = "bold", size = 12,
+                                               margin = margin(l=20, b=5)),
+        plot.subtitle = element_text(color = "grey45", size = 9,
+                                     margin = margin(l=20, b=2)),
+        plot.margin   = margin(10, 10, 10, 10))
+
+g_w2_2
+```
+
+## Votes et abstention
+
+```{r w3_2, fig.height=12}
+w3 <- make_waffle(
+  c("Non (Décisif)","Oui","Abstention"),
+  c(SCRUTIN_REF$non, SCRUTIN_REF$oui, abstentions)
+) |> mutate(categorie = factor(categorie, c("Non (Décisif)","Oui","Abstention")))
+
+g_w2_3 <- ggplot(w3, aes(x = x, y = y, fill = categorie)) +
+  geom_tile(color = "white", linewidth = 0.6) +
+  scale_fill_manual(values = c("Non (Décisif)"=COL_NON,
+                               "Oui"=COL_OUI, "Abstention"=COL_ABS)) +
+  coord_fixed() +
+  labs(title    = glue("**{comma(abstentions)}** personnes n'ont pas voté"),
+       subtitle = "Chaque carré = 1 000 voix",
+       fill = NULL) +
+  theme_void() +
+  theme(plot.title    = element_textbox_simple(face = "bold", size = 12,
+                                               margin = margin(l=20, b=5)),
+        plot.subtitle = element_text(color = "grey45", size = 9,
+                                     margin = margin(l=20, b=2)),
+        legend.position = "none",
+        plot.margin     = margin(10, 10, 10, 10))
+
+g_w2_3
+```
+
+## Population résidente
+```{r w4_2, fig.height=12}
+w_final <- make_waffle(
+  c("NON (décisif)", "OUI", "Abstention", "Résidents non-suisse"),
+  c(SCRUTIN_REF$non, SCRUTIN_REF$oui, abstentions, SCRUTIN_REF$pop_etranger),
+  unite = 1000
+)
+
+g_w2_4 <- ggplot(w_final, aes(x = x, y = y, fill = categorie)) +
+  geom_tile(color = "white", linewidth = 0.5) +
+  scale_fill_manual(values = c(
+    "NON (décisif)"      = COL_NON,
+    "OUI"                = COL_OUI,
+    "Abstention"         = COL_ABS,
+    "Résidents non-suisse"= "grey85"
+  )) +
+  coord_fixed() +
+  labs(title    = "14% de la population résidente a suffi pour refuser l'initiative",
+       subtitle = "Chaque carré = 1 000 personnes | Population résidente majeure",
+       fill     = NULL,
+       caption  = "Source : OCSTAT") +
+  theme_void() +
+  theme(
+    plot.title = element_textbox_simple(face = "bold", size = 13,
+                                        margin = margin(l=20, r=20, b=5)),
+    plot.subtitle = element_text(color = "grey45", size = 9,
+                                 margin = margin(l=20, b=2)),
+    plot.caption  = element_text(color = "grey45", size = 8,
+                                 margin = margin(r=14)),
+    legend.position = "bottom",
+    plot.margin     = margin(10, 10, 10, 10)
+  )
+
+g_w2_4
+```
+
+> En plus, on peut mentionner les enfants (<18 ans) qui n'ont pas le droit de vote. 
+
+
+```{r save plots, echo=FALSE}
+export_dir <- here::here("abstention_geneve", "figures")
+dir.create(export_dir, showWarnings = FALSE)
+walk(
+  list(
+    list(g_w1,      "W1_waffle_non.png",        5, 8),
+    list(g_w2,      "W2_waffle_oui.png",         5, 8),
+    list(g_w3,      "W3_waffle_abstention.png",  5, 8),
+    list(g_w2_1,      "W1_waffle_non_2.png",  5, 8),
+    list(g_w2_2,      "W2_waffle_oui_2.png",  5, 8),
+    list(g_w2_3,      "W3_waffle_abstention_2.png",  5, 8),
+    list(g_w2_4,      "W4_waffle_etrangers_complet.png",   5, 8),
+    list(g2_1,      "G21_age.png",      9, 6),
+    list(g2_2,      "G22_age_HF.png",           9, 6),
+    list(gt1_1,       "GT1_age_temps.png",          9, 5),
+    list(gt1_2,       "GT2_age_temps.png",          9, 5),
+    #list(gc1,       "Carte.png",          9, 5),
+    #list(gc2_1, "corr_densité_vote_1.png",           9, 5),
+    #list(gc2_2, "corr_densité_vote_2.png",           9, 5),
+    #list(gc2_3, "corr_densité_vote_3.png",           9, 5),
+    #list(gc2_4, "corr_densité_vote_4_manip.png",    9, 5),
+    list(gc3,       "violonplot_distrib_participation.png",            9, 5)
+  ),
+  \(x) ggsave(file.path(export_dir, x[[2]]),
+              plot = x[[1]], width = x[[3]], height = x[[4]], dpi = 300)
+)
+
+```
+------------------------------------------------------------------------
+
+*Analyse réalisée avec R — données OCSTAT, Canton de Genève (2005–2026)*
