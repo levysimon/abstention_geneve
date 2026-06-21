@@ -16,7 +16,6 @@ output:
     fig_width: 9
     fig_height: 5.5
     fig_caption: true
-    css: style.css
     self_contained: true
 editor_options:
   chunk_output_type: console
@@ -30,6 +29,17 @@ knitr::opts_chunk$set(
   fig.align = "center",
   dpi       = 180
 )
+```
+
+```{r install-swissdd, echo=FALSE, include=FALSE}
+# swissdd n'est pas sur le CRAN : il faut l'installer depuis GitHub.
+# Ce chunk l'installe automatiquement s'il n'est pas déjà présent.
+if (!requireNamespace("swissdd", quietly = TRUE)) {
+  if (!requireNamespace("remotes", quietly = TRUE)) {
+    install.packages("remotes")
+  }
+  remotes::install_github("politanch/swissdd")
+}
 ```
 
 ```{r libraries, echo=FALSE}
@@ -321,8 +331,8 @@ load_all_communes <- function(folder = ".") {
 ```
 
 ```{r chargement-donnees, echo=FALSE}
-folder_social   <- here::here("abstention_geneve", "data", "social")
-folder_communes <- here::here("abstention_geneve", "data", "commune")
+folder_social   <- here::here("data", "social")
+folder_communes <- here::here("data", "commune")
 
 df     <- load_all(folder_social)
 df_com <- load_all_communes(folder_communes)
@@ -1103,7 +1113,7 @@ g_w2_4
 
 
 ```{r save plots, echo=FALSE}
-export_dir <- here::here("abstention_geneve", "figures")
+export_dir <- here::here("figures")
 dir.create(export_dir, showWarnings = FALSE)
 walk(
   list(
