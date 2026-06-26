@@ -14,9 +14,10 @@ Qui vote, qui ne vote pas — et ce que ça change. Analyse des votations **gene
 ![Distribution de la participation selon le type de commune](./figures/violonplot_distrib_participation.png)
 
 ## Contenu 
-- [**Le rapport**](./Abstention_SimonLevy.pdf)
-- [**Le code**](./analyse_electorale.Rmd)
 - [**Le code interactif (HTML)**](./analyse_electorale.html)
+- [**Le code**](./analyse_electorale.Rmd)
+
+
 
 
 ## Source
