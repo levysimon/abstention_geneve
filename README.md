@@ -1,5 +1,5 @@
 # Abstention à Genève
-Qui vote, qui ne vote pas — et ce que ça change. Analyse des votations **genevoises** (2005–2026) à partir des données OCSTAT.
+Qui vote, qui ne vote pas - et ce que ça change. Analyse des votations **genevoises** (2005–2026) à partir des données OCSTAT.
 
 ## En bref
 -   14% de la population résidente a suffi à refuser la dernière initiative votée
@@ -7,6 +7,9 @@ Qui vote, qui ne vote pas — et ce que ça change. Analyse des votations **gene
 -   L'écart ville/campagne se confirme sur l'ensemble des communes genevoises
 
 ## Figures
+### Illustration visuelle 
+![Waffle](./figures/W4_waffle_etrangers_complet.png)
+
 ### Participation par âge, hommes et femmes
 ![Participation par âge, hommes et femmes](./figures/G22_age_HF.png)
 
@@ -16,8 +19,6 @@ Qui vote, qui ne vote pas — et ce que ça change. Analyse des votations **gene
 ## Contenu 
 - [**Le code interactif (HTML)**](./analyse_electorale.html)
 - [**Le code**](./analyse_electorale.Rmd)
-
-
 
 
 ## Source
